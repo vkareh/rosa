@@ -61,6 +61,7 @@ var args struct {
 
 	// Basic options
 	private            bool
+	privateLink        bool
 	multiAZ            bool
 	expirationDuration time.Duration
 	expirationTime     string
@@ -165,6 +166,23 @@ func init() {
 	flags.MarkHidden("expiration-time")
 	flags.MarkHidden("expiration")
 
+	flags.BoolVar(
+		&args.privateLink,
+		"private-link",
+		false,
+		"Provides private connectivity between VPCs, AWS services, and your on-premises networks, "+
+			"without exposing your traffic to the public internet.",
+	)
+
+	flags.StringSliceVar(
+		&args.subnetIDs,
+		"subnet-ids",
+		nil,
+		"The Subnet IDs to use when installing the cluster. "+
+			"Format should be a comma-separated list. "+
+			"Leave empty for installer provisioned subnet IDs.",
+	)
+
 	// Scaling options
 	flags.StringVar(
 		&args.computeMachineType,
@@ -261,16 +279,6 @@ func init() {
 		"Create a fake cluster that uses no AWS resources.",
 	)
 	flags.MarkHidden("fake-cluster")
-
-	flags.StringSliceVar(
-		&args.subnetIDs,
-		"subnet-ids",
-		nil,
-		"The Subnet IDs to use when installing the cluster. "+
-			"SubnetIDs should come in pairs; two per availability zone, one private and one public. "+
-			"Subnets are comma separated, for example: --subnet-ids=subnet-1,subnet-2."+
-			"Leave empty for installer provisioned subnet IDs.",
-	)
 
 	interactive.AddFlag(flags)
 }
@@ -426,11 +434,34 @@ func run(cmd *cobra.Command, _ []string) {
 		os.Exit(1)
 	}
 
+	useExistingVPC := false
+	privateLink := args.privateLink
+	privateLinkWarning := "Once the cluster is created, this option cannot be changed."
+	if interactive.Enabled() {
+		privateLink, err = interactive.GetBool(interactive.Input{
+			Question: "PrivateLink cluster",
+			Help:     fmt.Sprintf("%s %s", cmd.Flags().Lookup("private-link").Usage, privateLinkWarning),
+			Default:  privateLink,
+		})
+		if err != nil {
+			reporter.Errorf("Expected a valid private-link value: %s", err)
+			os.Exit(1)
+		}
+	} else if privateLink {
+		reporter.Warnf("You are choosing to use AWS PrivateLink for your cluster. %s", privateLinkWarning)
+		if !confirm.Confirm("use AWS PrivateLink for cluster '%s'", clusterName) {
+			os.Exit(0)
+		}
+	}
+
+	if privateLink {
+		useExistingVPC = true
+	}
+
 	subnetIDs := args.subnetIDs
 	subnetsProvided := len(subnetIDs) > 0
-	useExistingVPC := false
 	reporter.Debugf("Received the following subnetIDs: %v", args.subnetIDs)
-	if !subnetsProvided && interactive.Enabled() {
+	if !useExistingVPC && !subnetsProvided && interactive.Enabled() {
 		useExistingVPC, err = interactive.GetBool(interactive.Input{
 			Question: "Install into an existing VPC",
 			Help: "To install into an existing VPC you need to ensure that your VPC is configured " +
@@ -487,7 +518,8 @@ func run(cmd *cobra.Command, _ []string) {
 			mapSubnetToAZ[subnetID] = availabilityZone
 			mapAZCreated[availabilityZone] = false
 		}
-		if interactive.Enabled() && len(options) > 0 && (!multiAZ || len(mapAZCreated) >= 3) {
+		if ((privateLink && !subnetsProvided) || interactive.Enabled()) &&
+			len(options) > 0 && (!multiAZ || len(mapAZCreated) >= 3) {
 			subnetIDs, err = interactive.GetMultipleOptions(interactive.Input{
 				Question: "Subnet IDs",
 				Help:     cmd.Flags().Lookup("subnet-ids").Usage,
@@ -743,21 +775,26 @@ func run(cmd *cobra.Command, _ []string) {
 
 	// Cluster privacy:
 	private := args.private
-	privateWarning := "You will not be able to access your cluster until you edit network settings in your cloud provider."
-	if interactive.Enabled() {
-		private, err = interactive.GetBool(interactive.Input{
-			Question: "Private cluster",
-			Help:     fmt.Sprintf("%s %s", cmd.Flags().Lookup("private").Usage, privateWarning),
-			Default:  private,
-		})
-		if err != nil {
-			reporter.Errorf("Expected a valid private value: %s", err)
-			os.Exit(1)
-		}
-	} else if private {
-		reporter.Warnf("You are choosing to make your cluster private. %s", privateWarning)
-		if !confirm.Confirm("set cluster '%s' as private", clusterName) {
-			os.Exit(0)
+	if privateLink {
+		private = true
+	} else {
+		privateWarning := "You will not be able to access your cluster until " +
+			"you edit network settings in your cloud provider."
+		if interactive.Enabled() {
+			private, err = interactive.GetBool(interactive.Input{
+				Question: "Private cluster",
+				Help:     fmt.Sprintf("%s %s", cmd.Flags().Lookup("private").Usage, privateWarning),
+				Default:  private,
+			})
+			if err != nil {
+				reporter.Errorf("Expected a valid private value: %s", err)
+				os.Exit(1)
+			}
+		} else if private {
+			reporter.Warnf("You are choosing to make your cluster private. %s", privateWarning)
+			if !confirm.Confirm("set cluster '%s' as private", clusterName) {
+				os.Exit(0)
+			}
 		}
 	}
 
@@ -783,6 +820,7 @@ func run(cmd *cobra.Command, _ []string) {
 		DisableSCPChecks:   &args.disableSCPChecks,
 		AvailabilityZones:  availabilityZones,
 		SubnetIds:          subnetIDs,
+		PrivateLink:        &privateLink,
 	}
 
 	if args.fakeCluster {
