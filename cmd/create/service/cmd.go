@@ -38,11 +38,12 @@ var args ocm.CreateManagedServiceArgs
 var Cmd = &cobra.Command{
 	Use:   "service",
 	Short: "Creates a managed service.",
-	Long: `  Managed Services are Openshift clusters that provide a specific function.
+	Long: `  Managed Services are OpenShift clusters that provide a specific function.
   Use this command to create managed services.`,
-	Example: `  # Create a Managed Service using service1.
-  rosa create service --service=service1 --clusterName=clusterName`,
-	Run: run,
+	Example: `  # Create a Managed Service of type service1.
+  rosa create service --type=service1 --name=clusterName`,
+	Run:    run,
+	Hidden: true,
 }
 
 func init() {
@@ -51,17 +52,17 @@ func init() {
 
 	// Basic options
 	flags.StringVar(
-		&args.ServiceName,
-		"service",
+		&args.ServiceType,
+		"type",
 		"",
-		"Name of the service.",
+		"Type of service.",
 	)
 
 	flags.StringVar(
 		&args.ClusterName,
-		"clusterName",
+		"name",
 		"",
-		"Name of the cluster.",
+		"Name of the service instance.",
 	)
 }
 
@@ -87,9 +88,14 @@ func run(cmd *cobra.Command, _ []string) {
 	awsClient := aws.GetAWSClientForUserRegion(reporter, logger)
 
 	// Openshift version to use.
-	// Hard-coding 4.9 for now
-	version := "4.9"
+	versionList, err := getVersionList(ocmClient)
+	if err != nil {
+		reporter.Errorf("%s", err)
+		os.Exit(1)
+	}
+	version := versionList[0]
 	minor := ocm.GetVersionMinor(version)
+
 	role := aws.AccountRoles[aws.InstallerAccountRole]
 
 	// Find all installer roles in the current account using AWS resource tags
@@ -253,7 +259,7 @@ func run(cmd *cobra.Command, _ []string) {
 	reporter.Infof("Using AWS region: %s", args.AwsRegion)
 
 	// Parameter logic
-	addOn, err := ocmClient.GetAddOn(args.ServiceName)
+	addOn, err := ocmClient.GetAddOn(args.ServiceType)
 	if err != nil {
 		reporter.Errorf("Failed to process service parameters: %s", err)
 	}
@@ -285,6 +291,28 @@ func run(cmd *cobra.Command, _ []string) {
 		"\t%s\n"+
 		"\t%s\n",
 		rolesCMD, oidcCMD)
+}
+
+func getVersionList(ocmClient *ocm.Client) (versionList []string, err error) {
+	vs, err := ocmClient.GetVersions("")
+	if err != nil {
+		err = fmt.Errorf("Failed to find available OpenShift versions: %s", err)
+		return
+	}
+
+	for _, v := range vs {
+		if !ocm.HasSTSSupport(v.RawID(), v.ChannelGroup()) {
+			continue
+		}
+		versionList = append(versionList, v.ID())
+	}
+
+	if len(versionList) == 0 {
+		err = fmt.Errorf("Failed to find available OpenShift versions")
+		return
+	}
+
+	return
 }
 
 func getAccountRolePrefix(roleARN string, role aws.AccountRole) (string, error) {
