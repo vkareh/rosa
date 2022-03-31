@@ -84,17 +84,38 @@ func run(_ *cobra.Command, argv []string) {
 		"Name:             %s\n"+
 		"Description:      %s\n"+
 		"Documentation:    %s\n"+
+		"Install mode:     %s\n"+
 		"Operator:         %s\n"+
-		"Target namespace: %s\n"+
-		"Install mode:     %s\n",
+		"Target namespace: %s\n",
 		addOn.ID(),
 		addOn.Name(),
 		wrapText(addOn.Description()),
 		addOn.DocsLink(),
+		addOn.InstallMode(),
 		addOn.OperatorName(),
 		addOn.TargetNamespace(),
-		addOn.InstallMode(),
 	)
+	fmt.Println()
+
+	if len(addOn.CredentialsRequests()) > 0 {
+		fmt.Printf("CREDENTIALS REQUESTS\n")
+		for _, cr := range addOn.CredentialsRequests() {
+			fmt.Printf(""+
+				"- Service account:  %s\n"+
+				"  Secret name:      %s\n"+
+				"  Secret namespace: %s\n",
+				cr.ServiceAccount(),
+				cr.Name(),
+				cr.Namespace(),
+			)
+			if len(cr.PolicyPermissions()) > 0 {
+				fmt.Printf("  Policy permissions:\n")
+				for _, p := range cr.PolicyPermissions() {
+					fmt.Printf("  - %s\n", p)
+				}
+			}
+		}
+	}
 	fmt.Println()
 
 	if addOn.Parameters().Len() > 0 {

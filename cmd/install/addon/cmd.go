@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/aws/arn"
 	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 	"github.com/spf13/cobra"
 
@@ -35,6 +36,10 @@ import (
 	"github.com/openshift/rosa/pkg/ocm"
 	rprtr "github.com/openshift/rosa/pkg/reporter"
 )
+
+var args struct {
+	roleARN string
+}
 
 var Cmd = &cobra.Command{
 	Use:     "addon ID",
@@ -63,6 +68,13 @@ func init() {
 	confirm.AddFlag(flags)
 
 	ocm.AddClusterFlag(Cmd)
+
+	flags.StringVar(
+		&args.roleARN,
+		"role-arn",
+		"",
+		"The Amazon Resource Name of the role that the add-on will assume to access cloud resources.",
+	)
 }
 
 func run(cmd *cobra.Command, argv []string) {
@@ -123,14 +135,91 @@ func run(cmd *cobra.Command, argv []string) {
 		os.Exit(1)
 	}
 
-	addOn, err := ocmClient.GetAddOnInstallation(clusterKey, awsCreator, addOnID)
-	if addOn != nil {
+	installation, err := ocmClient.GetAddOnInstallation(clusterKey, awsCreator, addOnID)
+	if installation != nil {
 		reporter.Warnf("Addon '%s' is already installed on cluster '%s'", addOnID, clusterKey)
 		os.Exit(0)
 	}
 
+	addOn, err := ocmClient.GetAddOn(addOnID)
+	if err != nil {
+		reporter.Warnf("Failed to get add-on '%s'", addOnID)
+		os.Exit(1)
+	}
+
+	// Verify if addon requires STS authentication
+	isSTS := cluster.AWS().STS().RoleARN() != "" && len(addOn.CredentialsRequests()) > 0
+	roleARN := args.roleARN
+	if isSTS {
+		reporter.Warnf("Addon '%s' needs access to resources in account '%s'", addOnID, awsCreator.AccountID)
+	} else if roleARN != "" {
+		reporter.Errorf("The 'role-arn' option is only supported for STS add-ons")
+		os.Exit(1)
+	}
+
 	if !confirm.Confirm("install add-on '%s' on cluster '%s'", addOnID, clusterKey) {
 		os.Exit(0)
+	}
+
+	if isSTS {
+		for _, cr := range addOn.CredentialsRequests() {
+			if roleARN == "" {
+				roleARN = getRoleARN(cluster, cr, awsCreator.AccountID)
+			}
+			if interactive.Enabled() {
+				roleARN, err = interactive.GetString(interactive.Input{
+					Question: "Role ARN",
+					Help:     cmd.Flags().Lookup("role-arn").Usage,
+					Default:  roleARN,
+					Required: true,
+					Validators: []interactive.Validator{
+						aws.ARNValidator,
+					},
+				})
+				if err != nil {
+					reporter.Errorf("Expected a valid ARN: %s", err)
+					os.Exit(1)
+				}
+			} else if reporter.IsTerminal() {
+				reporter.Infof("Using %s for the %s service account", roleARN, cr.ServiceAccount())
+			}
+			if roleARN == "" {
+				reporter.Errorf("A role ARN is required for addon '%s' on cluster '%s'", addOnID, clusterKey)
+				os.Exit(1)
+			}
+
+			_, err := arn.Parse(roleARN)
+			if err != nil {
+				reporter.Errorf("Expected a valid Role ARN: %s", err)
+				os.Exit(1)
+			}
+
+			_, err = awsClient.GetRoleByARN(roleARN)
+			if err != nil {
+				reporter.Errorf("%s", err)
+				reporter.Infof("Run the following command to create the role:\n"+
+					"\trosa create addon-role -c %s --addon %s",
+					clusterKey, addOnID)
+				os.Exit(1)
+			}
+
+			operatorRole, err := cmv1.NewOperatorIAMRole().
+				Name(cr.Name()).
+				Namespace(cr.Namespace()).
+				RoleARN(roleARN).
+				ServiceAccount(cr.ServiceAccount()).
+				Build()
+			if err != nil {
+				reporter.Errorf("Failed to build operator role '%s': %s", roleARN, err)
+				os.Exit(1)
+			}
+
+			err = ocmClient.AddClusterOperatorRole(cluster, operatorRole)
+			if err != nil {
+				reporter.Errorf("Failed to add operator role to cluster '%s': %s", clusterKey, err)
+				os.Exit(1)
+			}
+		}
 	}
 
 	parameters, err := ocmClient.GetAddOnParameters(cluster.ID(), addOnID)
@@ -233,10 +322,22 @@ func run(cmd *cobra.Command, argv []string) {
 	}
 
 	reporter.Debugf("Installing add-on '%s' on cluster '%s'", addOnID, clusterKey)
-	err = ocmClient.InstallAddOn(clusterKey, awsCreator, addOnID, params)
+	err = ocmClient.InstallAddOn(clusterKey, awsCreator, addOnID, roleARN, params)
 	if err != nil {
 		reporter.Errorf("Failed to add add-on installation '%s' for cluster '%s': %v", addOnID, clusterKey, err)
 		os.Exit(1)
 	}
 	reporter.Infof("Add-on '%s' is now installing. To check the status run 'rosa list addons -c %s'", addOnID, clusterKey)
+}
+
+func getRoleARN(cluster *cmv1.Cluster, cr *cmv1.CredentialRequest, accountID string) string {
+	prefix := aws.GetPrefixFromOperatorRole(cluster)
+
+	roleName := fmt.Sprintf("%s-%s-%s", prefix, cr.Namespace(), cr.Name())
+	if len(roleName) > 64 {
+		roleName = roleName[0:64]
+	}
+
+	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, roleName)
+	return roleARN
 }

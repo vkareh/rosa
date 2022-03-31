@@ -41,7 +41,7 @@ type ClusterAddOn struct {
 }
 
 func (c *Client) InstallAddOn(clusterKey string, creator *aws.Creator, addOnID string,
-	params []AddOnParam) error {
+	roleARN string, params []AddOnParam) error {
 	cluster, err := c.GetCluster(clusterKey, creator)
 	if err != nil {
 		return err
@@ -49,6 +49,10 @@ func (c *Client) InstallAddOn(clusterKey string, creator *aws.Creator, addOnID s
 
 	addOnInstallationBuilder := cmv1.NewAddOnInstallation().
 		Addon(cmv1.NewAddOn().ID(addOnID))
+
+	if roleARN != "" {
+		addOnInstallationBuilder.RoleARN(roleARN)
+	}
 
 	if len(params) > 0 {
 		addOnParamList := make([]*cmv1.AddOnInstallationParameterBuilder, len(params))
@@ -302,4 +306,42 @@ func (c *Client) GetClusterAddOns(cluster *cmv1.Cluster) ([]*ClusterAddOn, error
 	}
 
 	return clusterAddOns, nil
+}
+
+func (c *Client) AddClusterOperatorRole(cluster *cmv1.Cluster, role *cmv1.OperatorIAMRole) error {
+	operatorRoles, err := c.ocm.ClustersMgmt().V1().
+		Clusters().
+		Cluster(cluster.ID()).
+		STSOperatorRoles().
+		List().
+		Send()
+	if err != nil {
+		return handleErr(operatorRoles.Error(), err)
+	}
+	exists := false
+	operatorRoles.Items().Each(func(item *cmv1.OperatorIAMRole) bool {
+		if role.Name() == item.Name() &&
+			role.Namespace() == item.Namespace() &&
+			role.RoleARN() == item.RoleARN() {
+			exists = true
+			return false
+		}
+		return true
+	})
+	if exists {
+		return nil
+	}
+
+	response, err := c.ocm.ClustersMgmt().V1().
+		Clusters().
+		Cluster(cluster.ID()).
+		STSOperatorRoles().
+		Add().
+		Body(role).
+		Send()
+	if err != nil {
+		return handleErr(response.Error(), err)
+	}
+
+	return nil
 }

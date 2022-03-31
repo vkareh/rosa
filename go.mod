@@ -27,3 +27,6 @@ require (
 )
 
 replace github.com/golang/glog => github.com/kubermatic/glog-logrus v0.0.0-20180829085450-3fa5b9870d1d
+
+// FIXME: Update to newest OCM SDK with support for CredentialsRequests
+replace github.com/openshift-online/ocm-sdk-go => ../../openshift-online/ocm-sdk-go
