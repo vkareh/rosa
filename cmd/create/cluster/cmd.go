@@ -116,11 +116,13 @@ var args struct {
 	nonSts bool
 
 	// Account IAM Roles
-	roleARN             string
-	externalID          string
-	supportRoleARN      string
-	controlPlaneRoleARN string
-	workerRoleARN       string
+	roleARN                           string
+	externalID                        string
+	supportRoleARN                    string
+	controlPlaneRoleARN               string
+	workerRoleARN                     string
+	oidcEndpointURL                   string
+	boundServiceAccountSigningKeyPath string
 
 	// Operator IAM Roles
 	operatorIAMRoles                 []string
@@ -249,6 +251,18 @@ func init() {
 		"",
 		"Prefix to use for all IAM roles used by the operators needed in the OpenShift installer. "+
 			"Leave empty to use an auto-generated one.",
+	)
+	flags.StringVar(
+		&args.oidcEndpointURL,
+		"oidc-endpoint-url",
+		"",
+		"",
+	)
+	flags.StringVar(
+		&args.boundServiceAccountSigningKeyPath,
+		"bound-service-account-signing-key-path",
+		"",
+		"",
 	)
 
 	flags.StringSliceVar(
@@ -1100,18 +1114,55 @@ func run(cmd *cobra.Command, _ []string) {
 			}
 		}
 		// Validate the role names are available on AWS
-		for _, role := range operatorIAMRoleList {
-			name, err := aws.GetResourceIdFromARN(role.RoleARN)
-			if err != nil {
-				r.Reporter.Errorf("Error validating role arn. Arn: %v. Error: %v", role.RoleARN, err)
-				os.Exit(1)
-			}
+		// for _, role := range operatorIAMRoleList {
+		// 	name, err := aws.GetResourceIdFromARN(role.RoleARN)
+		// 	if err != nil {
+		// 		r.Reporter.Errorf("Error validating role arn. Arn: %v. Error: %v", role.RoleARN, err)
+		// 		os.Exit(1)
+		// 	}
+		//
+		// 	err = awsClient.ValidateRoleNameAvailable(name)
+		// 	if err != nil {
+		// 		r.Reporter.Errorf("Error validating role: %v", err)
+		// 		os.Exit(1)
+		// 	}
+		// }
+	}
 
-			err = awsClient.ValidateRoleNameAvailable(name)
+	// Support for bring-your-own OIDC configuration
+	oidcEndpointURL := args.oidcEndpointURL
+	boundServiceAccountSigningKeyPath := args.boundServiceAccountSigningKeyPath
+	boundServiceAccountSigningKey := ""
+	if isSTS {
+		if interactive.Enabled() {
+			oidcEndpointURL, err = interactive.GetString(interactive.Input{
+				Question: "OIDC Endpoint URL",
+				Help:     cmd.Flags().Lookup("oidc-endpoint-url").Usage,
+				Required: false,
+				Default:  oidcEndpointURL,
+			})
 			if err != nil {
-				r.Reporter.Errorf("Error validating role: %v", err)
+				r.Reporter.Errorf("Expected a valid OIDC endpoint URL: %s", err)
 				os.Exit(1)
 			}
+			boundServiceAccountSigningKeyPath, err = interactive.GetCert(interactive.Input{
+				Question: "Bound Service Account Signing Key",
+				Help:     cmd.Flags().Lookup("bound-service-account-signing-key").Usage,
+				Required: false,
+				Default:  boundServiceAccountSigningKeyPath,
+			})
+			if err != nil {
+				r.Reporter.Errorf("Expected a valid OIDC endpoint URL: %s", err)
+				os.Exit(1)
+			}
+		}
+		if boundServiceAccountSigningKeyPath != "" {
+			key, err := ioutil.ReadFile(boundServiceAccountSigningKeyPath)
+			if err != nil {
+				r.Reporter.Errorf("Expected a valid certificate bundle: %s", err)
+				os.Exit(1)
+			}
+			boundServiceAccountSigningKey = string(key)
 		}
 	}
 
@@ -1933,44 +1984,46 @@ func run(cmd *cobra.Command, _ []string) {
 	}
 
 	clusterConfig := ocm.Spec{
-		Name:                      clusterName,
-		Region:                    region,
-		MultiAZ:                   multiAZ,
-		Version:                   version,
-		ChannelGroup:              channelGroup,
-		Flavour:                   args.flavour,
-		FIPS:                      fips,
-		EtcdEncryption:            etcdEncryption,
-		EnableProxy:               enableProxy,
-		AdditionalTrustBundle:     additionalTrustBundle,
-		Expiration:                expiration,
-		ComputeMachineType:        computeMachineType,
-		ComputeNodes:              computeNodes,
-		Autoscaling:               autoscaling,
-		MinReplicas:               minReplicas,
-		MaxReplicas:               maxReplicas,
-		NetworkType:               networkType,
-		MachineCIDR:               machineCIDR,
-		ServiceCIDR:               serviceCIDR,
-		PodCIDR:                   podCIDR,
-		HostPrefix:                hostPrefix,
-		Private:                   &private,
-		DryRun:                    &args.dryRun,
-		DisableSCPChecks:          &args.disableSCPChecks,
-		AvailabilityZones:         availabilityZones,
-		SubnetIds:                 subnetIDs,
-		PrivateLink:               &privateLink,
-		IsSTS:                     isSTS,
-		RoleARN:                   roleARN,
-		ExternalID:                externalID,
-		SupportRoleARN:            supportRoleARN,
-		OperatorIAMRoles:          operatorIAMRoleList,
-		ControlPlaneRoleARN:       controlPlaneRoleARN,
-		WorkerRoleARN:             workerRoleARN,
-		Mode:                      mode,
-		Tags:                      tagsList,
-		KMSKeyArn:                 kmsKeyARN,
-		DisableWorkloadMonitoring: &disableWorkloadMonitoring,
+		Name:                          clusterName,
+		Region:                        region,
+		MultiAZ:                       multiAZ,
+		Version:                       version,
+		ChannelGroup:                  channelGroup,
+		Flavour:                       args.flavour,
+		FIPS:                          fips,
+		EtcdEncryption:                etcdEncryption,
+		EnableProxy:                   enableProxy,
+		AdditionalTrustBundle:         additionalTrustBundle,
+		Expiration:                    expiration,
+		ComputeMachineType:            computeMachineType,
+		ComputeNodes:                  computeNodes,
+		Autoscaling:                   autoscaling,
+		MinReplicas:                   minReplicas,
+		MaxReplicas:                   maxReplicas,
+		NetworkType:                   networkType,
+		MachineCIDR:                   machineCIDR,
+		ServiceCIDR:                   serviceCIDR,
+		PodCIDR:                       podCIDR,
+		HostPrefix:                    hostPrefix,
+		Private:                       &private,
+		DryRun:                        &args.dryRun,
+		DisableSCPChecks:              &args.disableSCPChecks,
+		AvailabilityZones:             availabilityZones,
+		SubnetIds:                     subnetIDs,
+		PrivateLink:                   &privateLink,
+		IsSTS:                         isSTS,
+		RoleARN:                       roleARN,
+		ExternalID:                    externalID,
+		SupportRoleARN:                supportRoleARN,
+		OperatorIAMRoles:              operatorIAMRoleList,
+		ControlPlaneRoleARN:           controlPlaneRoleARN,
+		WorkerRoleARN:                 workerRoleARN,
+		OIDCEndpointURL:               oidcEndpointURL,
+		BoundServiceAccountSigningKey: boundServiceAccountSigningKey,
+		Mode:                          mode,
+		Tags:                          tagsList,
+		KMSKeyArn:                     kmsKeyARN,
+		DisableWorkloadMonitoring:     &disableWorkloadMonitoring,
 		Hypershift: ocm.Hypershift{
 			Enabled: isHostedCP,
 		},
